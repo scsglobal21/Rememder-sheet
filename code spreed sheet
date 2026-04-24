@@ -1,0 +1,392 @@
+var TOKEN        = "qx1IgaYRumfSMgKkOC8OzEmnOIHdREFTSAwWnl6uPl3MYnYkeMiB4nYTbEO955CLbAqr3HOQqihjJSdcZlLyDJzVu69GH4bCCAep0V3AenEI4JuDNCy2VZO8DXDnWnNU";
+var PHONE_ID     = "890784247460075";
+var API_URL      = "https://crmapi.wappconnect.com/api/meta/v19.0/" + PHONE_ID + "/messages";
+var SHEET_NAME   = "Reminder Tracker";
+var BIZ_NAME     = "SCS Global";
+var BIZ_PHONE    = "919850585932";
+
+var TEMPLATES = {
+  birthday:    "day_b_alert_24042026",
+  anniversary: "day_b_alert_24042026",
+  service_7:   "service_reminder__7_days_before",
+  service_3:   "service_reminder__3_days_befor",
+  service_1:   "service_reminder__1_day_before",
+  payment_7:   "payment_reminder__7_days_before",
+  payment_3:   "payment_reminder__3_days_before",
+  payment_1:   "payment_reminder__1_day_before"
+};
+
+// ✅ Menu
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("WhatsApp Reminders")
+    .addItem("Send to Selected Row", "manualSendRow")
+    .addSeparator()
+    .addItem("Reset Row to Pending", "resetStatus")
+    .addSeparator()
+    .addItem("Fill Reminder Dates", "fillAllReminderDates")
+    .addSeparator()
+    .addItem("Setup Trigger", "setupTrigger")
+    .addToUi();
+}
+
+// ✅ Triggers Setup
+function setupTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    ScriptApp.deleteTrigger(triggers[i]);
+  }
+  ScriptApp.newTrigger("dailyAutoSend")
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .nearMinute(0)
+    .create();
+  ScriptApp.newTrigger("onEditTrigger")
+    .forSpreadsheet(SpreadsheetApp.getActive())
+    .onEdit()
+    .create();
+  Logger.log("✅ Both triggers set! Daily 9AM + onEdit active.");
+}
+
+// ✅ onEdit — फक्त "Sending" status असेल तरच msg पाठव
+function onEditTrigger(e) {
+  var sheet = getSheet();
+  var row   = e.range.getRow();
+  var col   = e.range.getColumn();
+
+  if (row < 2) return;
+
+  // ✅ Status column (13) edit झाला तेव्हाच check करायचं
+  if (col !== 13) {
+    // Status column नाही — फक्त dates fill करा, msg नको
+    fillReminderDates(row);
+    return;
+  }
+
+  // ✅ Status "Sending" असेल तरच msg पाठव
+  var values = sheet.getRange(row, 1, 1, 13).getValues();
+  if (!values || !values[0]) return;
+
+  var d = parseRow(values[0]);
+
+  if (d.status !== "Sending") return;
+  if (!d.mobile || !d.name || !d.type) return;
+
+  var today = getTodayString();
+  var type  = (d.type || "").toLowerCase();
+  var key   = getKey(type, d, today);
+  if (!key) return;
+
+  Logger.log("📤 onEdit Sending triggered: " + d.name + " | " + key);
+
+  var ok = sendWhatsApp(d.mobile, TEMPLATES[key], getParams(d, key));
+  if (ok) {
+    sheet.getRange(row, 13).setValue("Sent");
+    Logger.log("✅ onEdit Sent: " + d.name + " | " + key);
+  } else {
+    sheet.getRange(row, 13).setValue("Pending");
+    Logger.log("❌ onEdit Failed — reset to Pending: " + d.name);
+  }
+}
+
+// ✅ Daily 9AM — फक्त "Pending" rows handle करेल
+function dailyAutoSend() {
+  var sheet   = getSheet();
+  var today   = getTodayString();
+  var allData = sheet.getDataRange().getValues();
+  var sent    = 0;
+
+  Logger.log("🔄 Daily Auto check: " + today);
+
+  for (var i = 1; i < allData.length; i++) {
+    if (!allData[i] || allData[i].length < 13) continue;
+    var d    = parseRow(allData[i]);
+    var type = (d.type || "").toLowerCase();
+
+    if (!d.mobile) continue;
+
+    // ✅ फक्त "Pending" rows — बाकी सगळे skip
+    if (d.status !== "Pending") continue;
+
+    var key = getKey(type, d, today);
+    if (!key) continue;
+
+    // ✅ "Sending" set करा — onEditTrigger fire होईल आणि msg जाईल
+    sheet.getRange(i + 1, 13).setValue("Sending");
+    SpreadsheetApp.flush();
+    Logger.log("📤 Set Sending: " + d.name + " | " + key);
+
+    // ✅ onEditTrigger handle करेल — इथे sendWhatsApp नको
+    Utilities.sleep(2000); // 2 seconds wait — onEdit trigger fire होण्यासाठी
+  }
+
+  Logger.log("✅ Daily done: " + today);
+}
+
+// ✅ Key Logic
+function getKey(type, d, today) {
+  var key = null;
+  if (type === "birthday") {
+    if (matchDayMonth(d.birthday, today)) {
+      key = "birthday";
+      Logger.log("🎂 Birthday match: " + d.name + " | " + d.birthday);
+    }
+  } else if (type === "anniversary") {
+    if (matchDayMonth(d.anniversary, today)) {
+      key = "anniversary";
+      Logger.log("💍 Anniversary match: " + d.name + " | " + d.anniversary);
+    }
+  } else if (type === "service" && d.serviceDue) {
+    var due = parseDateStr(d.serviceDue);
+    if (due) {
+      var diff = daysDiff(today, due);
+      if      (diff === 7) { key = "service_7"; Logger.log("🔧 Service 7d: " + d.name); }
+      else if (diff === 3) { key = "service_3"; Logger.log("🔧 Service 3d: " + d.name); }
+      else if (diff === 1) { key = "service_1"; Logger.log("🔧 Service 1d: " + d.name); }
+    }
+  } else if (type === "payment" && d.paymentDue) {
+    var due2 = parseDateStr(d.paymentDue);
+    if (due2) {
+      var diff2 = daysDiff(today, due2);
+      if      (diff2 === 7) { key = "payment_7"; Logger.log("💰 Payment 7d: " + d.name); }
+      else if (diff2 === 3) { key = "payment_3"; Logger.log("💰 Payment 3d: " + d.name); }
+      else if (diff2 === 1) { key = "payment_1"; Logger.log("💰 Payment 1d: " + d.name); }
+    }
+  }
+  return key;
+}
+
+// ✅ Manual Send — Selected Row
+function manualSendRow() {
+  var sheet = getSheet();
+  var ui    = SpreadsheetApp.getUi();
+  var row   = sheet.getActiveCell().getRow();
+  if (row < 2) { ui.alert("Customer row var click kara."); return; }
+  var values = sheet.getRange(row, 1, 1, 13).getValues();
+  if (!values || !values[0]) { ui.alert("Row data nahi."); return; }
+  var d = parseRow(values[0]);
+  if (!d.mobile) { ui.alert("Mobile number nahi."); return; }
+
+  var today = getTodayString();
+  var type  = (d.type || "").toLowerCase();
+  var key   = null;
+
+  if      (type === "birthday")    { key = "birthday"; }
+  else if (type === "anniversary") { key = "anniversary"; }
+  else if (type === "service") {
+    if      (d.day1 === today) key = "service_1";
+    else if (d.day3 === today) key = "service_3";
+    else                       key = "service_7";
+  } else if (type === "payment") {
+    if      (d.day1 === today) key = "payment_1";
+    else if (d.day3 === today) key = "payment_3";
+    else                       key = "payment_7";
+  }
+
+  if (!key) { ui.alert("Template match nahi zhala."); return; }
+
+  var resp = ui.alert(
+    "Send Message?",
+    d.name + " (" + d.type + ")\nTemplate: " + TEMPLATES[key],
+    ui.ButtonSet.YES_NO
+  );
+  if (resp !== ui.Button.YES) return;
+
+  var ok = sendWhatsApp(d.mobile, TEMPLATES[key], getParams(d, key));
+  if (ok) {
+    sheet.getRange(row, 13).setValue("Sent");
+    ui.alert("✅ Sent to " + d.name);
+  } else {
+    ui.alert("❌ Failed. Check Execution log.");
+  }
+}
+
+// ✅ Reset to Pending
+function resetStatus() {
+  var sheet = getSheet();
+  var ui    = SpreadsheetApp.getUi();
+  var row   = sheet.getActiveCell().getRow();
+  if (row < 2) { ui.alert("Data row var click kara."); return; }
+  sheet.getRange(row, 13).setValue("Pending");
+  ui.alert("✅ Reset to Pending. Msg उद्या 9AM ला जाईल.");
+}
+
+// ✅ Due date varun 7, 3, 1 days before dates calculate
+function calcReminderDates(dueDateStr) {
+  if (!dueDateStr) return { day7: "", day3: "", day1: "" };
+  var due = parseDateStr(dueDateStr);
+  if (!due || isNaN(due.getTime())) return { day7: "", day3: "", day1: "" };
+  var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function offsetDate(baseDate, offsetDays) {
+    var d = new Date(baseDate.getTime());
+    d.setDate(d.getDate() - offsetDays);
+    return String(d.getDate()).padStart(2,"0") + "-" + months[d.getMonth()] + "-" + d.getFullYear();
+  }
+  return {
+    day7: offsetDate(due, 7),
+    day3: offsetDate(due, 3),
+    day1: offsetDate(due, 1)
+  };
+}
+
+// ✅ Sheet row madhe dates write karo
+function fillReminderDates(row) {
+  var sheet  = getSheet();
+  var values = sheet.getRange(row, 1, 1, 13).getValues()[0];
+  var d      = parseRow(values);
+  var type   = (d.type || "").toLowerCase();
+  var dueStr = (type === "service") ? d.serviceDue : d.paymentDue;
+  var dates  = calcReminderDates(dueStr);
+  if (dates.day7) {
+    sheet.getRange(row, 10).setValue(dates.day7);
+    sheet.getRange(row, 11).setValue(dates.day3);
+    sheet.getRange(row, 12).setValue(dates.day1);
+    Logger.log("📅 Dates filled row " + row + ": " + JSON.stringify(dates));
+  }
+}
+
+// ✅ Menu — सर्व rows साठी dates fill
+function fillAllReminderDates() {
+  var sheet   = getSheet();
+  var lastRow = sheet.getLastRow();
+  for (var i = 2; i <= lastRow; i++) {
+    fillReminderDates(i);
+  }
+  SpreadsheetApp.getUi().alert("✅ Dates filled for all rows!");
+}
+
+// ✅ Template Parameters
+function getParams(d, key) {
+  var name   = d.name || "";
+  var amount = (d.amount || "").toString().replace(/[₹,]/g, "").trim();
+  var due    = d.serviceDue || d.paymentDue || "";
+  var map = {
+    birthday:    [name, "तुमच्या वाढदिवसाच्या हार्दिक शुभेच्छा!", "आयुष्य आनंद, यश आणि समाधानाने भरलेले राहो", "शुभेच्छुक"],
+    anniversary: [name, "तुमच्या लग्नाच्या वाढदिवसाच्या हार्दिक शुभेच्छा!", "तुमचे नाते अधिक दृढ होवो आणि तुमचा एकत्रित प्रवास प्रत्येक वर्षासोबत अधिक सुंदर होत जावो", "शुभेच्छुक"],
+    service_7:   [name, due, amount],
+    service_3:   [name, due, amount],
+    service_1:   [name, due, amount],
+    payment_7:   [name, amount, due],
+    payment_3:   [name, amount, due],
+    payment_1:   [name, amount, due]
+  };
+  return map[key] || [name];
+}
+
+// ✅ WhatsApp API Call
+function sendWhatsApp(mobile, templateName, params) {
+  try {
+    var mob = String(mobile).replace(/\D/g, "");
+    if (mob.length === 10) mob = "91" + mob;
+    if (mob.indexOf("91") !== 0) mob = "91" + mob;
+    if (mob.length !== 12) { Logger.log("Invalid mobile: " + mobile); return false; }
+
+    var parameters = [];
+    for (var i = 0; i < params.length; i++) {
+      parameters.push({ type: "text", text: String(params[i]) });
+    }
+
+    var payload = {
+      to:             mob,
+      recipient_type: "individual",
+      type:           "template",
+      template: {
+        language:   { policy: "deterministic", code: "en" },
+        name:       templateName,
+        components: [{ type: "body", parameters: parameters }]
+      }
+    };
+
+    var options = {
+      method:             "post",
+      contentType:        "application/json",
+      headers:            { "Authorization": "Bearer " + TOKEN },
+      payload:            JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    var response = UrlFetchApp.fetch(API_URL, options);
+    var code     = response.getResponseCode();
+    var body     = response.getContentText();
+    Logger.log("To: " + mob + " | Template: " + templateName + " | Status: " + code + " | " + body);
+    return (code === 200 || code === 201);
+  } catch (e) {
+    Logger.log("Error: " + e.message);
+    return false;
+  }
+}
+
+// ✅ Helper Functions
+function getSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
+}
+
+function toStr(v) {
+  if (v === null || v === undefined || v === "") return "";
+  if (v instanceof Date) {
+    var dd = String(v.getDate()).padStart(2, "0");
+    var mm = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][v.getMonth()];
+    return dd + "-" + mm + "-" + v.getFullYear();
+  }
+  return String(v).trim();
+}
+
+function parseRow(r) {
+  if (!r) return {};
+  return {
+    id:          toStr(r[0]),
+    name:        toStr(r[1]),
+    mobile:      toStr(r[2]),
+    type:        toStr(r[3]),
+    birthday:    toStr(r[4]),
+    anniversary: toStr(r[5]),
+    serviceDue:  toStr(r[6]),
+    paymentDue:  toStr(r[7]),
+    amount:      toStr(r[8]),
+    day7:        toStr(r[9]),
+    day3:        toStr(r[10]),
+    day1:        toStr(r[11]),
+    status:      toStr(r[12])
+  };
+}
+
+function getTodayString() {
+  var now    = new Date();
+  var dd     = String(now.getDate()).padStart(2, "0");
+  var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return dd + "-" + months[now.getMonth()] + "-" + now.getFullYear();
+}
+
+function matchDayMonth(dateStr, today) {
+  if (!dateStr) return false;
+  var dp = dateStr.split("-");
+  var tp = today.split("-");
+  if (dp.length < 2 || tp.length < 2) return false;
+  var match = (dp[0] === tp[0] && dp[1] === tp[1]);
+  Logger.log("📅 matchDayMonth | input: " + dateStr + " | today: " + today + " | result: " + match);
+  return match;
+}
+
+function parseDateStr(val) {
+  if (!val) return null;
+  if (val instanceof Date) return val;
+  var months = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+  var parts  = String(val).split("-");
+  if (parts.length === 3) {
+    var m = months[parts[1]];
+    if (m !== undefined) {
+      return new Date(parseInt(parts[2]), m, parseInt(parts[0]));
+    }
+  }
+  return new Date(val);
+}
+
+function daysDiff(todayStr, dueDate) {
+  var parts     = todayStr.split("-");
+  var months    = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+  var todayDate = new Date(parseInt(parts[2]), months[parts[1]], parseInt(parts[0]));
+  var diff      = Math.round((dueDate - todayDate) / (1000 * 60 * 60 * 24));
+  return diff;
+}
