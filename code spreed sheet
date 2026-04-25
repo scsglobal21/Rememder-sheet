@@ -1,4 +1,4 @@
-var TOKEN        = "qx1IgaYRumfSMgKkOC8OzEmnOIHdREFTSAwWnl6uPl3MYnYkeMiB4nYTbEO955CLbAqr3HOQqihjJSdcZlLyDJzVu69GH4bCCAep0V3AenEI4JuDNCy2VZO8DXDnWnNU";
+var TOKEN        = "qx1IgaYRumfSMgKk78A8D0696wpWsMBk6P8x7iYs1TwZ4bmyQVU5ERVJTQ09SRQquVFrDoGZWzREFTSAVthai90muWAjqrWhxpP7Px0yJntu5niI7CdGu5TUqOh0yJZqAFsknjCMLduXunVLT12ANuK2ROxJpjRlPn1iAdp9sXpikJdtJs0U9i9x60fM1Gb7REFTSAkc3SfWnghhlzKNREFTSA9ib4GUb04TUNDXPqJa";
 var PHONE_ID     = "890784247460075";
 var API_URL      = "https://crmapi.wappconnect.com/api/meta/v19.0/" + PHONE_ID + "/messages";
 var SHEET_NAME   = "Reminder Tracker";
@@ -46,10 +46,10 @@ function setupTrigger() {
     .forSpreadsheet(SpreadsheetApp.getActive())
     .onEdit()
     .create();
-  Logger.log("✅ Both triggers set! Daily 9AM + onEdit active.");
+  Logger.log("✅ Triggers set! Daily 9AM + onEdit active.");
 }
 
-// ✅ onEdit — फक्त "Sending" status असेल तरच msg पाठव
+// ✅ onEdit — "Sending" set केल्यावर लगेच msg जाईल
 function onEditTrigger(e) {
   var sheet = getSheet();
   var row   = e.range.getRow();
@@ -57,19 +57,19 @@ function onEditTrigger(e) {
 
   if (row < 2) return;
 
-  // ✅ Status column (13) edit झाला तेव्हाच check करायचं
+  // ✅ Status column नाही — फक्त dates fill
   if (col !== 13) {
-    // Status column नाही — फक्त dates fill करा, msg नको
     fillReminderDates(row);
     return;
   }
 
-  // ✅ Status "Sending" असेल तरच msg पाठव
+  // ✅ Status column edit झाला — "Sending" आहे का check करा
   var values = sheet.getRange(row, 1, 1, 13).getValues();
   if (!values || !values[0]) return;
 
   var d = parseRow(values[0]);
 
+  // ✅ फक्त "Sending" असेल तरच msg पाठव
   if (d.status !== "Sending") return;
   if (!d.mobile || !d.name || !d.type) return;
 
@@ -78,19 +78,19 @@ function onEditTrigger(e) {
   var key   = getKey(type, d, today);
   if (!key) return;
 
-  Logger.log("📤 onEdit Sending triggered: " + d.name + " | " + key);
+  Logger.log("📤 Sending triggered: " + d.name + " | " + key);
 
   var ok = sendWhatsApp(d.mobile, TEMPLATES[key], getParams(d, key));
   if (ok) {
     sheet.getRange(row, 13).setValue("Sent");
-    Logger.log("✅ onEdit Sent: " + d.name + " | " + key);
+    Logger.log("✅ Sent: " + d.name + " | " + key);
   } else {
     sheet.getRange(row, 13).setValue("Pending");
-    Logger.log("❌ onEdit Failed — reset to Pending: " + d.name);
+    Logger.log("❌ Failed — Pending: " + d.name);
   }
 }
 
-// ✅ Daily 9AM — फक्त "Pending" rows handle करेल
+// ✅ Daily 9AM — Pending rows ला directly msg पाठवेल
 function dailyAutoSend() {
   var sheet   = getSheet();
   var today   = getTodayString();
@@ -106,22 +106,28 @@ function dailyAutoSend() {
 
     if (!d.mobile) continue;
 
-    // ✅ फक्त "Pending" rows — बाकी सगळे skip
+    // ✅ फक्त "Pending" rows
     if (d.status !== "Pending") continue;
 
     var key = getKey(type, d, today);
     if (!key) continue;
 
-    // ✅ "Sending" set करा — onEditTrigger fire होईल आणि msg जाईल
+    // ✅ Duplicate block — आधी Sending set करा
     sheet.getRange(i + 1, 13).setValue("Sending");
     SpreadsheetApp.flush();
-    Logger.log("📤 Set Sending: " + d.name + " | " + key);
 
-    // ✅ onEditTrigger handle करेल — इथे sendWhatsApp नको
-    Utilities.sleep(2000); // 2 seconds wait — onEdit trigger fire होण्यासाठी
+    // ✅ Directly msg पाठवा
+    var ok = sendWhatsApp(d.mobile, TEMPLATES[key], getParams(d, key));
+    if (ok) {
+      sheet.getRange(i + 1, 13).setValue("Sent");
+      sent++;
+      Logger.log("✅ Sent: " + d.name + " | " + key);
+    } else {
+      sheet.getRange(i + 1, 13).setValue("Pending");
+      Logger.log("❌ Failed: " + d.name + " | " + key);
+    }
   }
-
-  Logger.log("✅ Daily done: " + today);
+  Logger.log("✅ Daily done: " + today + " | Total Sent: " + sent);
 }
 
 // ✅ Key Logic
@@ -130,20 +136,20 @@ function getKey(type, d, today) {
   if (type === "birthday") {
     if (matchDayMonth(d.birthday, today)) {
       key = "birthday";
-      Logger.log("🎂 Birthday match: " + d.name + " | " + d.birthday);
+      Logger.log("🎂 Birthday: " + d.name + " | " + d.birthday);
     }
   } else if (type === "anniversary") {
     if (matchDayMonth(d.anniversary, today)) {
       key = "anniversary";
-      Logger.log("💍 Anniversary match: " + d.name + " | " + d.anniversary);
+      Logger.log("💍 Anniversary: " + d.name + " | " + d.anniversary);
     }
   } else if (type === "service" && d.serviceDue) {
     var due = parseDateStr(d.serviceDue);
     if (due) {
       var diff = daysDiff(today, due);
-      if      (diff === 7) { key = "service_7"; Logger.log("🔧 Service 7d: " + d.name); }
-      else if (diff === 3) { key = "service_3"; Logger.log("🔧 Service 3d: " + d.name); }
-      else if (diff === 1) { key = "service_1"; Logger.log("🔧 Service 1d: " + d.name); }
+      if      (diff === 7) { key = "service_7";  Logger.log("🔧 Service 7d: " + d.name); }
+      else if (diff === 3) { key = "service_3";  Logger.log("🔧 Service 3d: " + d.name); }
+      else if (diff === 1) { key = "service_1";  Logger.log("🔧 Service 1d: " + d.name); }
     }
   } else if (type === "payment" && d.paymentDue) {
     var due2 = parseDateStr(d.paymentDue);
@@ -209,7 +215,7 @@ function resetStatus() {
   var row   = sheet.getActiveCell().getRow();
   if (row < 2) { ui.alert("Data row var click kara."); return; }
   sheet.getRange(row, 13).setValue("Pending");
-  ui.alert("✅ Reset to Pending. Msg उद्या 9AM ला जाईल.");
+  ui.alert("✅ Pending set. Msg 9AM ला जाईल.");
 }
 
 // ✅ Due date varun 7, 3, 1 days before dates calculate
@@ -263,7 +269,7 @@ function getParams(d, key) {
   var due    = d.serviceDue || d.paymentDue || "";
   var map = {
     birthday:    [name, "तुमच्या वाढदिवसाच्या हार्दिक शुभेच्छा!", "आयुष्य आनंद, यश आणि समाधानाने भरलेले राहो", "शुभेच्छुक"],
-    anniversary: [name, "तुमच्या लग्नाच्या वाढदिवसाच्या हार्दिक शुभेच्छा!", "तुमचे नाते अधिक दृढ होवो आणि तुमचा एकत्रित प्रवास प्रत्येक वर्षासोबत अधिक सुंदर होत जावो", "शुभेच्छुक"],
+    anniversary: [name, "तुमच्या लग्नाच्या वाढदिवसाच्या हार्दिक शुभेच्छा!", "नाते अधिक दृढ होवो आणि तुमचा एकत्रित प्रवास प्रत्येक वर्षासोबत अधिक सुंदर होत जावो", "शुभेच्छुक"],
     service_7:   [name, due, amount],
     service_3:   [name, due, amount],
     service_1:   [name, due, amount],
